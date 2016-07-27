@@ -1,2 +1,3 @@
 # diff_pi_bot
-mobile differential drive sensor platformbased on RPi and Arduino
+mobile differential drive sensor platform
+based on RPi and Arduino
