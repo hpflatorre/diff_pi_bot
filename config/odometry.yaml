@@ -1,0 +1,11 @@
+# pulses per meter
+encoder_puse_meter_ratio: 181.0
+# distance between wheels
+wheel_distance: 0.130
+# estimated autocovariances
+pose_covariance: 0.0001
+twist_covariance: 0.0001
+# topic to publish odometry
+topic_odom: "odom"
+frame_id: "odom"
+child_frame_id: "base_footprint"

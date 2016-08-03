@@ -1,0 +1,16 @@
+# accelerometer_gain:
+# raw_acc * accelerometer_gain = acc (in m/s²)
+accelerometer_gain: 0.00059820565 #(0.000061 * 9.80665)
+# raw_gyro * gyro_gain = w (in rad/s)
+gyro_gain: 0.000152716 #0.00875 * pi / 180
+magnetometer_gain: 0.000146156 # 1/6842
+# Autocovariance, set to -1 for invalid sensor reading
+accelerometer_covariance: 0.0000001
+gyro_covariance: 0.000000029
+magnetometer_covariance: 0.00001
+
+pose_covariance: -1
+# gravity acceleration (m/s²)
+gravity_acceleration: 9.80665
+topic_imu: "imu/data_raw"
+topic_mag: "imu/mag"

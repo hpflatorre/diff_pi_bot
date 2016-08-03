@@ -1,0 +1,9 @@
+<launch>
+	<rosparam file="$(find mvs_bot)/config/cmd_vel.yaml" command="load" ns="cmd" />
+    <rosparam file="$(find mvs_bot)/config/serial.yaml" command="load" />
+    <rosparam file="$(find mvs_bot)/config/odometry.yaml" command="load" ns="odom" />
+    <rosparam file="$(find mvs_bot)/config/imu_mag.yaml" command="load" ns="imu_mag"/>
+  <node pkg="mvs_bot" type="mvs_bot_node" name="mvs_bot_node" output="screen">
+    <remap from="cmd_vel" to="/turtlebot_teleop/cmd_vel"/>
+  </node>
+</launch>

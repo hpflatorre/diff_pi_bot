@@ -1,0 +1,12 @@
+<launch>
+  <group ns="alpha">
+    <!--<include file="$(find pr2_alpha)/$(env ROBOT).machine" />-->
+    <include file="$(find mvs_bot)/config/serial_interface.xml" />
+    <!--<include file="$(find mvs_bot)/launch/imu_mag.xml" />-->
+
+    <!-- The navigation stack and associated parameters -->
+    <include file="$(find mvs_bot)/config/imu_complementary_filter.xml" />
+    <include file="$(find mvs_bot)/config/odometry_imu_ekf.xml" />
+    <include file="$(find mvs_bot)/config/move_base.xml" />
+  </group>
+</launch>

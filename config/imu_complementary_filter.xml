@@ -1,0 +1,7 @@
+<!--rosrun imu_complementary_filter complementary_filter_node-->
+<launch>
+	<node pkg="imu_complementary_filter" type="complementary_filter_node" name="complementary_filter" output="screen">
+	  <rosparam file="$(find mvs_bot)/config/imu_complementary_filter.yaml" command="load"/>
+	  <!--<remap from="odom" to="pr2_base_odometry/odom" />-->
+	</node>
+</launch>
