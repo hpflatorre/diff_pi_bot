@@ -1,4 +1,4 @@
-#include "shelf_bot/imu_mag.h"
+#include "diff_pi_bot/imu_mag.h"
 
 
 imu_mag::imu_mag() {
