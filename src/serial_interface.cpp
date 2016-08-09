@@ -3,14 +3,16 @@
 #include "geometry_msgs/Twist.h"
 #include "sensor_msgs/Imu.h"
 #include "sensor_msgs/MagneticField.h"
+#include "sensor_msgs/LaserScan.h"
 #include "tf/tf.h"
 #include "tf/transform_broadcaster.h"
 #include <sstream>
 #include <cstdio>
 #include <serial/serial.h>
 
-#include "shelf_bot/diff_wheel_odometry.h"
-#include "shelf_bot/imu_mag.h"
+#include "diff_pi_bot/diff_wheel_odometry.h"
+#include "diff_pi_bot/imu_mag.h"
+#include "diff_pi_bot/leddar_one.h"
 
 using std::string;
 using std::exception;
@@ -24,12 +26,16 @@ using std::vector;
 #define MSG_FIELD_SEPARATOR ';'
 #define MSG_ODOMETRY        'o'
 #define MSG_IMU             'i'
+#define MSG_LIDAR_READING   'l'
+#define MSG_LIDAR_ANGLE     'a'
 
 // DEFAULTS
 #define DEFAULT_ODOM_POSE_COVARIANCE          0.00001
 #define DEFAULT_ODOM_TWIST_COVARIANCE         0.00001
-#define DEFAULT_SERIAL_PORT                   "/dev/ttyUSB0"
-#define DEFAULT_SERIAL_BAUD                   115200
+#define DEFAULT_ARDUINO_PORT                  "/dev/ttyUSB0"
+#define DEFAULT_ARDUINO_BAUD                  115200
+#define DEFAULT_LEDDAR_PORT                   "/dev/ttyUSB1"
+#define DEFAULT_LEDDAR_BAUD                   115200
 #define DEFAULT_ENCODER_PULSE_METER_RATIO     181                               // 40 counts = 0.121m
 #define DEFAULT_WHEEL_DISTANCE_M              0.13
 #define DEFAULT_GAIN_ACC                      0.000061 * 9.80665                // FS = 2
@@ -44,6 +50,19 @@ using std::vector;
 #define DEFAULT_TOPIC_ODOM                    "odom"
 #define DEFAULT_TOPIC_IMU                     "imu/data_raw"
 #define DEFAULT_TOPIC_MAG                     "imu/mag"
+#define DEFAULT_TOPIC_LIDAR                   "scan"
+
+//#define LIDAR_MIN_ANGLE             -90
+//#define LIDAR_MAX_ANGLE             90
+//#define LIDAR_ANGLE_INCREMENT       2
+//#define LIDAR_INCREMENT_PERIOD_MS   11
+#define LIDAR_MAX_ARRAY_SIZE        180
+#define LIDAR_MAX_RANGE_M           10 
+#define LIDAR_MIN_RANGE_M           0.1
+#define VEL_PUBLISH_PERIOD_S        0.10
+//#define LIDAR_READING_PERIOD_S    	0.02
+#define PI                          3.14159265
+
 
 // Global Variables:
 volatile double g_vel_l(0), g_vel_r(0), g_wheel_distance(DEFAULT_WHEEL_DISTANCE_M), g_turn_multiplier(); 
@@ -70,38 +89,18 @@ void cmd_vel_callback(const geometry_msgs::Twist::ConstPtr& msg) {
   ROS_INFO("Velocity: [vl: %f; vr: %f ]", g_vel_l, g_vel_r);
 }
 
-
 int main(int argc, char **argv) {
- 
-  // Check Arguments  //////////////////////////////////////////////////////////
-  /*
-  if(argc < 2) {
-    print_usage();
-    return 0;
-  }
 
-  // Argument 1 is the serial port or enumerate flag
-  string port(argv[1]);
-  
-  if( port == "-e" ) {
-    enumerate_ports();
-      return 0;
-  }
-  else if( argc < 4 ) {
-    print_usage();
-    return 1;
-  }
-  */
   // Argument 2 is the baudrate
-  int baud = 0;
-  string port, topic_cmd_vel, topic_odom, topic_imu, topic_mag;
+  int arduino_baud = 0;
+  string arduino_port, topic_cmd_vel, topic_odom, topic_imu, topic_mag;
   string odom_frame_id, odom_child_frame_id;
-  //sscanf(argv[2], "%lu", &baud);
   
   // Message handle variables
-  std::string inputs, remainder, message, outputs;
+  std::string inputs, inputs2, remainder, remainder2, message, outputs, outputs2;
   size_t index;
   double d1, d2, d3, d4, d5, d6, d7, d8, d9;
+  ros::Time last_vel_time, last_lidar_reading;
 
   // Parameters
   double odom_pose_cov, odom_twist_cov;
@@ -109,9 +108,19 @@ int main(int argc, char **argv) {
   double cov_acc, cov_gyro, cov_mag;
   double gain_acc, gain_gyro, gain_mag;
 
+  //Lidar scan
+  std::vector<float> scan_array;
+  std::vector<float> intensity_array;
+  double scan_angle = 0;
+  ros::Time scan_start_time, scan_end_time;
+  int scan_direction = 1, scan_count = 0;
+  bool scan_state = false;
+  sensor_msgs::LaserScan lidar_msg;
+  
+
   // ROS ///////////////////////////////////////////////////////////////////////
   
-  ros::init(argc, argv, "Diff_pi_bot_serial_interface");
+  ros::init(argc, argv, "diff_pi_bot_serial_interface");
   ros::NodeHandle n;
   
   // Get odometry model parameters
@@ -136,6 +145,12 @@ int main(int argc, char **argv) {
     ROS_INFO("Using default odom/child_frame_id: %s", odom_child_frame_id.c_str());
 
   // Get IMU and Magnetometer parameters
+  if (!n.param<std::string>("imu_mag/topic_imu", topic_imu, DEFAULT_TOPIC_IMU))
+    ROS_INFO("Using default imu_mag/topic_imu: %s", topic_imu.c_str());
+
+  if (!n.param<std::string>("imu_mag/topic_mag", topic_mag, DEFAULT_TOPIC_MAG))
+    ROS_INFO("Using default imu_mag/topic_mag: %s", topic_mag.c_str());
+
   if (!n.param<double>("imu_mag/accelerometer_covariance", cov_acc, DEFAULT_ACC_COVARIANCE))
     ROS_INFO("Using default imu_mag/accelerometer_covariance: %f", cov_acc);
 
@@ -161,30 +176,59 @@ int main(int argc, char **argv) {
   if (!n.param<std::string>("odom/topic_odom", topic_odom, DEFAULT_TOPIC_ODOM))
     ROS_INFO("Using default odom/topic_odom: %s", topic_odom.c_str());
 
-  if (!n.param<std::string>("imu_mag/topic_imu", topic_imu, DEFAULT_TOPIC_IMU))
-    ROS_INFO("Using default imu_mag/topic_imu: %s", topic_imu.c_str());
-
-  if (!n.param<std::string>("imu_mag/topic_mag", topic_mag, DEFAULT_TOPIC_MAG))
-    ROS_INFO("Using default imu_mag/topic_mag: %s", topic_mag.c_str());
+  
 
   // Get serial port parameters
-  if (!n.param<std::string>("serial_port", port, DEFAULT_SERIAL_PORT))
-    ROS_INFO("Using default serialport: %s", port.c_str());
+  if (!n.param<std::string>("serial_port", arduino_port, DEFAULT_ARDUINO_PORT))
+    ROS_INFO("Using default arduino port: %s", arduino_port.c_str());
 
-  if (!n.param<int>("baud_rate", baud, DEFAULT_SERIAL_BAUD))
-    ROS_INFO("Using default baud_rate: %d", baud);
+  if (!n.param<int>("baud_rate", arduino_baud, DEFAULT_ARDUINO_BAUD))
+    ROS_INFO("Using default arduino baud_rate: %d", arduino_baud);
 
+  
 
+  // Get Lidar parameters
+  string lidar_port, lidar_topic;
+	int lidar_baud, lidar_angular_step, lidar_min_angle, lidar_max_angle;
+	float lidar_freq, lidar_max_range, lidar_min_range;
 
+	if (!n.param<std::string>("lidar_serial_port", lidar_port, DEFAULT_LEDDAR_PORT))
+    ROS_INFO("Using default lidar_seria_port: %s", lidar_port.c_str());
 
+  if (!n.param<int>("lidar_baud_rate", lidar_baud, DEFAULT_LEDDAR_BAUD))
+    ROS_INFO("Using default lidar_baud_rate: %d", lidar_baud);
+
+  if (!n.param<std::string>("lidar/topic", lidar_topic, DEFAULT_TOPIC_LIDAR))
+    ROS_INFO("Using default lidar/topic: %s", lidar_topic.c_str());
+
+  if (!n.param<int>("lidar/angular_step", lidar_angular_step, 2))
+    ROS_INFO("Using default lidar/angular_step: %d", lidar_angular_step);
+
+  if (!n.param<float>("lidar/sampling_freq", lidar_freq, 50))
+    ROS_INFO("Using default lidar/sampling_freq: %f", lidar_freq);
+
+  if (!n.param<int>("lidar/max_angle_deg", lidar_max_angle, 90))
+    ROS_INFO("Using default lidar/max_angle_deg: %d", lidar_max_angle);
+ 
+  if (!n.param<int>("lidar/min_angle_deg", lidar_min_angle, -90))
+    ROS_INFO("Using default lidar/min_angle_deg: %d", lidar_min_angle);
+
+  if (!n.param<float>("lidar/min_range", lidar_min_range, 0.1))
+    ROS_INFO("Using default lidar/min_range: %f", lidar_min_range);
+
+  if (!n.param<float>("lidar/max_range", lidar_max_range, 10))
+    ROS_INFO("Using default lidar/max_range: %f", lidar_max_range);
+  
+  last_vel_time = ros::Time::now();
+  
   // port, baudrate, timeout in milliseconds
-  serial::Serial ser(port, baud, serial::Timeout::simpleTimeout(1000));
+  serial::Serial arduino(arduino_port, arduino_baud, serial::Timeout::simpleTimeout(1000));
 
-  cout << "Serial port status:";
-  if(ser.isOpen())
-    cout << " Success, port " << port << " open, baud " << baud << endl;
+  cout << "Arduino port status:";
+  if(arduino.isOpen())
+    cout << " Success, arduino_port " << arduino_port << " open, baud " << arduino_baud << endl;
   else {
-    cout << " ERROR: Failed to open serial port " << port << endl;
+    cout << " ERROR: Failed to open arduino serial port " << arduino_port << endl;
     // TODO: end program or exception
     exit(0);
   }
@@ -194,6 +238,7 @@ int main(int argc, char **argv) {
   ros::Publisher odom_pub = n.advertise<nav_msgs::Odometry>(topic_odom, 10);
   ros::Publisher imu_pub = n.advertise<sensor_msgs::Imu>(topic_imu, 10);
   ros::Publisher mag_pub = n.advertise<sensor_msgs::MagneticField>(topic_mag, 10);
+  ros::Publisher lidar_pub = n.advertise<sensor_msgs::LaserScan>(lidar_topic, 10);
   tf::TransformBroadcaster odom_broadcaster;
 
   ros::Rate loop_rate(100);
@@ -203,14 +248,16 @@ int main(int argc, char **argv) {
   odom.set_odom_child_frame_id(odom_child_frame_id);
   imu_mag imu(gain_acc, cov_acc, gain_gyro, cov_gyro, gain_mag, cov_mag);
 
-  // TODO: lidar
-  
+  // Lidar
+  leddar_one leddar1(lidar_port, lidar_baud);
+
   // Main LOOP  ////////////////////////////////////////////////////////////////
-  while (ros::ok())
-  {
-    if(ser.available()){
+  while (ros::ok()) {
+
+    // Read from Arduino Serial
+    if(arduino.available()) {
       //ROS_INFO_STREAM("Reading from serial port");
-      inputs = ser.read(ser.available());
+      inputs = arduino.read(arduino.available());
       std::stringstream inputss(inputs);
       inputs.clear();
 
@@ -218,11 +265,9 @@ int main(int argc, char **argv) {
         getline(inputss, message, '\n');
         remainder += message;
         //std::stringstream remainderss(remainder);
-        //cout << remainder;
         if (!inputss.eof()) {
           switch (remainder[0]) {
             case MSG_IMU:
-             // cout << 'i' ;//<< endl;
             index = remainder.find_first_of(';',0) + 1;
             index = remainder.find_first_of(';',index) + 1;
             d1 = atof(&remainder.c_str()[index]);
@@ -246,7 +291,7 @@ int main(int argc, char **argv) {
             imu.update(d1, d2, d3, d4, d5, d6, d7, d8, d9);
             imu_pub.publish(imu.imu_msg());
             mag_pub.publish(imu.mag_msg());
-              
+
             break;
             case MSG_ODOMETRY:
               //cout << remainder << endl;//<< endl;
@@ -269,21 +314,86 @@ int main(int argc, char **argv) {
           remainder.clear();
         }
       }
-      //cout << endl;
     }
     
+    if ((ros::Time::now() - last_lidar_reading).toSec() >= (1.0/lidar_freq)) {
+      leddar1.request_reading();
+      last_lidar_reading = ros::Time::now();
+	  }
+	
+    // Read from Leddar Serial
+    if(leddar1.get_reading() >= 0) {
 
-    std::stringstream outputss;
-    size_t bytes_wrote;
-    outputss << "v;" << (float)(g_vel_l) << ";" << (float)(g_vel_r) << ";" << endl;
-    outputs = outputss.str();
-    bytes_wrote = ser.write(outputs);
+      scan_array.push_back(leddar1.detections[0].distance/1000.0);
+      intensity_array.push_back(leddar1.detections[0].amplitude/256.0);
+      scan_count++;
 
-    //cout << "sent: " << bytes_wrote << " bytes " << outputs << endl;
+      // if scan has finnished: publish it!
+      if ((!scan_state || scan_count >= LIDAR_MAX_ARRAY_SIZE) && scan_count > 0) {
+
+        scan_end_time = ros::Time::now();
+
+        lidar_msg.header.stamp = ros::Time::now();
+        lidar_msg.header.frame_id = "laser";
+
+        // TODO: use max and min angles to allow asymmetric scans 
+        lidar_msg.angle_min = lidar_max_angle * scan_direction * PI / 180.0;
+        lidar_msg.angle_max = - lidar_max_angle * scan_direction  * PI / 180.0;
+        lidar_msg.angle_increment = - (lidar_max_angle - lidar_min_angle)  * scan_direction * PI / (180.0 * scan_count);
+        lidar_msg.time_increment = (scan_end_time - scan_start_time).toSec() / scan_count;
+        lidar_msg.scan_time = (scan_end_time - scan_start_time).toSec();
+        lidar_msg.range_min = lidar_min_range;
+        lidar_msg.range_max = lidar_max_range;
+
+        scan_array.resize(scan_count);
+        lidar_msg.ranges = scan_array;
+        intensity_array.resize(scan_count);
+        lidar_msg.intensities = intensity_array;
+        scan_array.clear();
+        intensity_array.clear();
+
+        lidar_pub.publish(lidar_msg);
+        scan_start_time = ros::Time::now();
+
+        scan_count = 0;
+
+      }
+      // Send servo angle message to Arduino Serial
+      // This needs to be the first message sent to the serial port on each ros loop 
+
+      if(scan_state) {
+        if (scan_angle * scan_direction < lidar_max_angle) {
+          scan_angle += lidar_angular_step * scan_direction;
+        }
+        else {
+          scan_direction = -scan_direction;
+          scan_state = false;
+        }
+      }
+      else {
+        scan_state = true;
+      }
+
+      std::stringstream outputss2;
+      outputss2 << "a;" << (int) scan_angle << ";" << endl;
+      outputs2 = outputss2.str();
+      cout << outputs2 << endl;
+      arduino.write(outputs2);
+
+    }
+
+    // Write velocity msg to Arduino Serial
+    if ((ros::Time::now() - last_vel_time).toSec() >= VEL_PUBLISH_PERIOD_S)  {
+      std::stringstream outputss;
+      size_t bytes_wrote;
+      outputss << "v;" << (float)(g_vel_l) << ";" << (float)(g_vel_r) << ";" << endl;
+      outputs = outputss.str();
+      bytes_wrote = arduino.write(outputs);
+      last_vel_time = ros::Time::now();
+    }
+
     ros::spinOnce();
-
     loop_rate.sleep();
-
   }
 
   return 0;

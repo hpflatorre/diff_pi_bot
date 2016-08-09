@@ -1,9 +1,10 @@
 <launch>
-	<rosparam file="$(find mvs_bot)/config/cmd_vel.yaml" command="load" ns="cmd" />
-    <rosparam file="$(find mvs_bot)/config/serial.yaml" command="load" />
-    <rosparam file="$(find mvs_bot)/config/odometry.yaml" command="load" ns="odom" />
-    <rosparam file="$(find mvs_bot)/config/imu_mag.yaml" command="load" ns="imu_mag"/>
-  <node pkg="mvs_bot" type="mvs_bot_node" name="mvs_bot_node" output="screen">
+	<rosparam file="$(find diff_pi_bot)/config/cmd_vel.yaml" command="load" ns="cmd" />
+    <rosparam file="$(find diff_pi_bot)/config/serial.yaml" command="load" />
+    <rosparam file="$(find diff_pi_bot)/config/odometry.yaml" command="load" ns="odom" />
+    <rosparam file="$(find diff_pi_bot)/config/imu_mag.yaml" command="load" ns="imu_mag"/>
+    <rosparam file="$(find diff_pi_bot)/config/lidar.yaml" command="load" ns="lidar"/>
+  <node pkg="diff_pi_bot" type="diff_pi_bot" name="diff_pi_bot" output="screen">
     <remap from="cmd_vel" to="/turtlebot_teleop/cmd_vel"/>
   </node>
 </launch>

@@ -1,2 +1,4 @@
 serial_port: "/dev/ttyUSB0"
 baud_rate: 115200
+lidar_serial_port: "/dev/ttyUSB1"
+lidar_baud_rate: 115200
