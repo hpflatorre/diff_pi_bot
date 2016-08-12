@@ -4,6 +4,7 @@
 #include "sensor_msgs/Imu.h"
 #include "sensor_msgs/MagneticField.h"
 #include "sensor_msgs/LaserScan.h"
+#include "std_msgs/String.h"
 #include "tf/tf.h"
 #include "tf/transform_broadcaster.h"
 #include <sstream>
@@ -28,6 +29,7 @@ using std::vector;
 #define MSG_IMU             'i'
 #define MSG_LIDAR_READING   'l'
 #define MSG_LIDAR_ANGLE     'a'
+#define MSG_PWR_MON         'p'
 
 // DEFAULTS
 #define DEFAULT_ODOM_POSE_COVARIANCE          0.00001
@@ -52,15 +54,14 @@ using std::vector;
 #define DEFAULT_TOPIC_MAG                     "imu/mag"
 #define DEFAULT_TOPIC_LIDAR                   "scan"
 
-//#define LIDAR_MIN_ANGLE             -90
-//#define LIDAR_MAX_ANGLE             90
-//#define LIDAR_ANGLE_INCREMENT       2
-//#define LIDAR_INCREMENT_PERIOD_MS   11
+#define LIDAR_INTER_SCAN_TIME       0.0
+#define LIDAR_SHIFT_RAD             0.04
+#define LIDAR_CENTER_RAD            0.12
+
 #define LIDAR_MAX_ARRAY_SIZE        180
 #define LIDAR_MAX_RANGE_M           10 
 #define LIDAR_MIN_RANGE_M           0.1
 #define VEL_PUBLISH_PERIOD_S        0.10
-//#define LIDAR_READING_PERIOD_S    	0.02
 #define PI                          3.14159265
 
 
@@ -86,7 +87,7 @@ void cmd_vel_callback(const geometry_msgs::Twist::ConstPtr& msg) {
   //ROS_INFO("I heard: [vlx: %f; vaz: %f ]", msg->linear.x, msg->angular.z);
   g_vel_l = (msg->linear.x - g_wheel_distance * msg->angular.z / 2);
   g_vel_r = (msg->linear.x + g_wheel_distance * msg->angular.z / 2);
-  ROS_INFO("Velocity: [vl: %f; vr: %f ]", g_vel_l, g_vel_r);
+  //ROS_INFO("Velocity: [vl: %f; vr: %f ]", g_vel_l, g_vel_r);
 }
 
 int main(int argc, char **argv) {
@@ -100,7 +101,7 @@ int main(int argc, char **argv) {
   std::string inputs, inputs2, remainder, remainder2, message, outputs, outputs2;
   size_t index;
   double d1, d2, d3, d4, d5, d6, d7, d8, d9;
-  ros::Time last_vel_time, last_lidar_reading;
+  ros::Time last_vel_time, lidar_reading_start_time;
 
   // Parameters
   double odom_pose_cov, odom_twist_cov;
@@ -111,7 +112,7 @@ int main(int argc, char **argv) {
   //Lidar scan
   std::vector<float> scan_array;
   std::vector<float> intensity_array;
-  double scan_angle = 0;
+  double scan_angle = 0, scan_delay = 0;
   ros::Time scan_start_time, scan_end_time;
   int scan_direction = 1, scan_count = 0;
   bool scan_state = false;
@@ -239,6 +240,7 @@ int main(int argc, char **argv) {
   ros::Publisher imu_pub = n.advertise<sensor_msgs::Imu>(topic_imu, 10);
   ros::Publisher mag_pub = n.advertise<sensor_msgs::MagneticField>(topic_mag, 10);
   ros::Publisher lidar_pub = n.advertise<sensor_msgs::LaserScan>(lidar_topic, 10);
+	ros::Publisher display_pub = n.advertise<std_msgs::String>("display_text", 1);
   tf::TransformBroadcaster odom_broadcaster;
 
   ros::Rate loop_rate(100);
@@ -294,16 +296,37 @@ int main(int argc, char **argv) {
 
             break;
             case MSG_ODOMETRY:
-              //cout << remainder << endl;//<< endl;
               index = remainder.find_first_of(';',0) + 1;
               index = remainder.find_first_of(';',index) + 1;
               d1 = atof(&remainder.c_str()[index]);
               index = remainder.find_first_of(';',index) + 1;
               d2 = atof(&remainder.c_str()[index]);
-              //cout << d1 << "\t" << d2 << endl;
+
               odom.update(d1, d2);
               odom_pub.publish(odom.odom_msg());
               odom_broadcaster.sendTransform(odom.tf_msg());
+            break;
+            case MSG_PWR_MON:
+              index = remainder.find_first_of(';',0) + 1;
+              index = remainder.find_first_of(';',index) + 1;
+              d1 = atof(&remainder.c_str()[index]);
+              index = remainder.find_first_of(';',index) + 1;
+              d2 = atof(&remainder.c_str()[index]);
+
+              std::stringstream ss;
+              std_msgs::String display_msg;
+              ss << "Bat:" << 5.0 * d2 / 1023.0 << "V" << endl;
+              display_msg.data = ss.str();
+              display_pub.publish(display_msg);
+
+              // test for critical battery level
+              if ( d1 == 0 ) {
+                ss.clear();
+                ss << "LOW BATTERY POWEROFF" << endl;
+                display_msg.data = ss.str();
+                display_pub.publish(display_msg);
+                system("systemctl poweroff");
+              }
             break;
             //default:
             //  while (ros::ok() && remainder)
@@ -316,10 +339,15 @@ int main(int argc, char **argv) {
       }
     }
     
-    if ((ros::Time::now() - last_lidar_reading).toSec() >= (1.0/lidar_freq)) {
-      leddar1.request_reading();
-      last_lidar_reading = ros::Time::now();
-	  }
+    if (lidar_freq > 0.0) {
+       if ((ros::Time::now() - lidar_reading_start_time).toSec() >= (scan_delay + 1.0/lidar_freq)) {
+        leddar1.request_reading();
+        lidar_reading_start_time = ros::Time::now();
+        scan_delay = 0;
+	    }
+
+    }
+   
 	
     // Read from Leddar Serial
     if(leddar1.get_reading() >= 0) {
@@ -337,9 +365,17 @@ int main(int argc, char **argv) {
         lidar_msg.header.frame_id = "laser";
 
         // TODO: use max and min angles to allow asymmetric scans 
-        lidar_msg.angle_min = lidar_max_angle * scan_direction * PI / 180.0;
-        lidar_msg.angle_max = - lidar_max_angle * scan_direction  * PI / 180.0;
-        lidar_msg.angle_increment = - (lidar_max_angle - lidar_min_angle)  * scan_direction * PI / (180.0 * scan_count);
+        if (scan_direction > 0) {
+          lidar_msg.angle_min = (lidar_min_angle * PI / 180.0) + LIDAR_CENTER_RAD - LIDAR_SHIFT_RAD;
+          lidar_msg.angle_max = (lidar_max_angle * PI / 180.0) + LIDAR_CENTER_RAD - LIDAR_SHIFT_RAD;
+          lidar_msg.angle_increment = (lidar_max_angle - lidar_min_angle) * PI / (180.0 * scan_count);
+        }
+        else {
+          lidar_msg.angle_min = (lidar_max_angle * PI / 180.0) + LIDAR_CENTER_RAD + LIDAR_SHIFT_RAD;
+          lidar_msg.angle_max = (lidar_min_angle * PI / 180.0) + LIDAR_CENTER_RAD + LIDAR_SHIFT_RAD;
+          lidar_msg.angle_increment = - (lidar_max_angle - lidar_min_angle) * PI / (180.0 * scan_count);
+        }
+        
         lidar_msg.time_increment = (scan_end_time - scan_start_time).toSec() / scan_count;
         lidar_msg.scan_time = (scan_end_time - scan_start_time).toSec();
         lidar_msg.range_min = lidar_min_range;
@@ -362,22 +398,45 @@ int main(int argc, char **argv) {
       // This needs to be the first message sent to the serial port on each ros loop 
 
       if(scan_state) {
-        if (scan_angle * scan_direction < lidar_max_angle) {
-          scan_angle += lidar_angular_step * scan_direction;
+        //if (scan_angle * scan_direction < lidar_max_angle) {
+        //  scan_angle += lidar_angular_step * scan_direction;
+        //}
+        if (scan_direction > 0) {
+          if (scan_angle < lidar_max_angle) {
+            scan_angle += lidar_angular_step;
+          }
+          else {
+            scan_state = false;
+            scan_direction = -1;
+          }
+
         }
         else {
-          scan_direction = -scan_direction;
-          scan_state = false;
+          if (scan_angle > lidar_min_angle) {
+            scan_angle -= lidar_angular_step;
+          }
+          else {
+            scan_state = false;
+            scan_direction = 1;
+          }
         }
       }
+  	  // reverse scan
+      //else {
+      //  scan_direction = -scan_direction;
+      //  scan_state = false;
+      //}
+      
+      // Reset scan flag
       else {
         scan_state = true;
+        scan_delay = LIDAR_INTER_SCAN_TIME;
       }
 
       std::stringstream outputss2;
       outputss2 << "a;" << (int) scan_angle << ";" << endl;
       outputs2 = outputss2.str();
-      cout << outputs2 << endl;
+      //cout << outputs2 << endl;
       arduino.write(outputs2);
 
     }

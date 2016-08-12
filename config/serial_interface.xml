@@ -7,4 +7,5 @@
   <node pkg="diff_pi_bot" type="diff_pi_bot" name="diff_pi_bot" output="screen">
     <remap from="cmd_vel" to="/turtlebot_teleop/cmd_vel"/>
   </node>
+  <node pkg="display_ssd1306_64" type="subscriber.py" name="olde_node" output="screen"/>
 </launch>

@@ -1,8 +1,8 @@
 topic: "scan"
-angular_step: 3
-sampling_freq: 10
-max_angle_deg: 50
-min_angle_deg: -50
+angular_step: 5
+sampling_freq: 50
+max_angle_deg: 90
+min_angle_deg: -90
 min_range: 0.1
 max_range: 10
 
