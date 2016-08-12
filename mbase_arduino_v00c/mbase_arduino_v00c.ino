@@ -31,16 +31,20 @@
 #define PIN_LEDDAR_TX     9
 #define PIN_LEDDAR_TX_EN  10
 #define PIN_LEDDAR_SERVO  11
-
+#define PIN_BAT_VOLTAGE   A0
+#define PIN_BAT_STATE     A6
+#define PIN_IMU_VIN       A2
+#define PIN_IMU_GND       A3
 
 // Timing and update rates
 #define PERIOD_ENCODER_MS         100
-#define PERIOD_ENCODER_PULSE_MS   10  // 15 works fine
-#define PERIOD_IMU_MS             20
-#define PERIOD_LIDAR_MS           100
+#define PERIOD_ENCODER_PULSE_MS   10    // 15 works fine
+#define PERIOD_IMU_MS             20    // IMU update period
+#define PERIOD_PWR_MON_MS         10000 // Power monitor update period
 #define MOTOR_PWM_DEAD_ZONE       100
 // Movement threshold
 #define MOTOR_MINIMUM_SPEED       0.01
+#define SPEED_COMMAND_TIMEOUT_MS  500
 #define ENCODER_COUNTS_PER_METER  181.00
 
 
@@ -52,11 +56,13 @@
 #define MSG_LIDAR_READING   'l'
 #define MSG_LIDAR_ANGLE     'a'
 #define MSG_VELOCITY        'v'
+#define MSG_PWR_MON         'p'
+
 #define MSG_TIMESTAMP       millis()
 #define SERIAL_IN_BUFF_SZ   100
 
 #define SERIAL_BAUD         115200
-#define LEDDAR_BAUD         9600
+
 
 #define FORWARD 1
 #define REVERSE -1
@@ -88,8 +94,8 @@ Encoder g_encoder_r(PERIOD_ENCODER_PULSE_MS);
 DCMotor g_motor_l(PIN_MOTOR_PWM_L, PIN_MOTOR_DIR_L);
 DCMotor g_motor_r(PIN_MOTOR_PWM_R, PIN_MOTOR_DIR_R);
 
-PID g_l_PID(&g_l_input, &g_l_output, &g_l_setpoint, 500,400,50, DIRECT);
-PID g_r_PID(&g_r_input, &g_r_output, &g_r_setpoint, 500,400,50, DIRECT);
+PID g_l_PID(&g_l_input, &g_l_output, &g_l_setpoint, 700,300,50, DIRECT);
+PID g_r_PID(&g_r_input, &g_r_output, &g_r_setpoint, 700,300,50, DIRECT);
 //PID g_r_PID(&g_r_input, &g_r_output, &g_r_setpoint, 1000,800,100, DIRECT);
 
 void encoder_l_event() {
@@ -110,9 +116,6 @@ void encoder_r_event() {
 
 void i2c_init(){
 
-  //Initialize Leddar 
-  //g_leddar.init();
-  
   // I2C interface for IMU
   Wire.begin();
 
@@ -138,10 +141,15 @@ void i2c_init(){
   g_mag.enableDefault();
   // reserve 200 bytes for the input_string:
   g_input_string.reserve(SERIAL_IN_BUFF_SZ);
+  Serial.println("Init OK!");
 }
 
 void setup() {
-  
+  pinMode(PIN_IMU_VIN, OUTPUT);
+  pinMode(PIN_IMU_GND, OUTPUT);
+  digitalWrite(PIN_IMU_VIN, HIGH);
+  digitalWrite(PIN_IMU_GND, LOW);
+  delay(100);
   Serial.begin(SERIAL_BAUD);
   i2c_init();
   g_l_PID.SetOutputLimits(-255, 255);
@@ -151,6 +159,7 @@ void setup() {
   g_l_PID.SetMode(AUTOMATIC);
   g_r_PID.SetMode(AUTOMATIC);
   g_leddar_servo.attach(PIN_LEDDAR_SERVO);
+  pinMode(PIN_BAT_STATE, INPUT_PULLUP);
 }
 
 bool encoder_update () {
@@ -227,8 +236,6 @@ bool IMU_update() {
     
     g_imu.read();
     g_mag.read();
-    //g_imu.a.x, g_imu.a.y, g_imu.a.z,
-    //g_imu.g.x, g_imu.g.y, g_imu.g.z
     Serial.print(MSG_IMU);
     Serial.print(MSG_FIELD_SEPARATOR);
     Serial.print(MSG_TIMESTAMP);
@@ -256,57 +263,38 @@ bool IMU_update() {
   }
   return false;
 }
-/*
-bool lidar_update() {
-  static uint32_t timer = 0;
-  unsigned int Distance = 0;
-  unsigned int Amplitude = 0;
-  if (uint32_t(millis()-timer) > PERIOD_LIDAR_MS){
-    timer = millis();
-#ifdef DEBUG_TEST_MSGS
-//    Serial.print(MSG_LIDAR_READING);
-//    Serial.print(MSG_FIELD_SEPARATOR);
-//    Serial.print(MSG_TIMESTAMP);
-//    Serial.print(MSG_FIELD_SEPARATOR);
-//    Serial.print("415;105;");
-//    Serial.print(MSG_FIELD_SEPARATOR);
-//    Serial.print(MSG_END_BYTE);
-    //return true;
-#endif
 
-    char result = g_leddar.getDetections();
-    if (result >= 0) {
-      // Show the first detection only
-      Serial.print(MSG_LIDAR_READING);
-      Serial.print(MSG_FIELD_SEPARATOR);
-      Serial.print(MSG_TIMESTAMP);
-      Serial.print(MSG_FIELD_SEPARATOR);
-      Serial.print(g_leddar.Detections[0].Distance);
-      Serial.print(MSG_FIELD_SEPARATOR);
-      Serial.print(g_leddar.Detections[0].Amplitude);
-      Serial.print(MSG_FIELD_SEPARATOR);
-      Serial.print(MSG_END_BYTE);
-      return true;
-    }
-    else {
-      //Serial.print("Error: "); Serial.println((int)result); 
-      //lcd.setCursor(0,0);
-      //mySerial.print("\nError: "); mySerial.print((int)result); mySerial.print("        ");
-      //lcd.setCursor(0,1);
-      //mySerial.print("\nNo LeddarOne Found");
-      //return false;
-      Serial.print(MSG_LIDAR_READING);
-      Serial.print(MSG_FIELD_SEPARATOR);
-      Serial.print(0);
-      Serial.print(MSG_FIELD_SEPARATOR);
-      Serial.print(0);
-      Serial.print(MSG_FIELD_SEPARATOR);
-      Serial.print(MSG_END_BYTE);
-    }
+bool power_monitor_update () {
+  static uint32_t timer = 0;
+  static uint32_t s_last_time;
+  static int32_t s_l_last_read, s_r_last_read;
+  if (uint32_t(millis()-timer) > PERIOD_PWR_MON_MS){
+    timer = millis();
+
+#ifdef DEBUG_TEST_MSGS
+    Serial.print(MSG_PWR_MON);
+    Serial.print(MSG_FIELD_SEPARATOR);
+    Serial.print(MSG_TIMESTAMP);
+    Serial.print(MSG_FIELD_SEPARATOR);
+    Serial.print("1;200");
+    Serial.print(MSG_FIELD_SEPARATOR);
+    Serial.print(MSG_END_BYTE);
+    return true;
+#endif
+    Serial.print(MSG_PWR_MON);
+    Serial.print(MSG_FIELD_SEPARATOR);
+    Serial.print(MSG_TIMESTAMP);
+    Serial.print(MSG_FIELD_SEPARATOR);
+    Serial.print(digitalRead(PIN_BAT_STATE)); // will be 0 if power boost indicates low battery
+    Serial.print(MSG_FIELD_SEPARATOR);
+    Serial.print(analogRead(PIN_BAT_VOLTAGE));  // Analog read of the battery level (1023 * Vbat / 5.0V)
+    Serial.print(MSG_FIELD_SEPARATOR);
+    Serial.print(MSG_END_BYTE);
+    return true;
   }
   return false;
 }
-*/
+
 
 /*
   SerialEvent occurs whenever a new data comes in the
@@ -330,15 +318,16 @@ void serialEvent() {
 }
 
 void loop() {
+  static uint32_t s_speed_command_timeout;
   uint8_t index;
- 
+  int angle;
   encoder_update();
   speed_update ();
   IMU_update();
-  //lidar_update();
+  power_monitor_update ();
 
   g_l_PID.Compute();
-   g_motor_l_forward = (g_l_output >= 0);
+  g_motor_l_forward = (g_l_output >= 0);
   g_r_PID.Compute();
   g_motor_r_forward = (g_r_output >= 0);
 
@@ -349,32 +338,39 @@ void loop() {
 
   // Get incomming messages
   if (g_string_complete) {
-    
-    if (g_input_string[0] == MSG_VELOCITY){
-      index = g_input_string.indexOf('MSG_FIELD_SEPARATOR')+1;
-      g_l_setpoint = g_input_string.substring(index).toFloat();
-      index = g_input_string.indexOf('MSG_FIELD_SEPARATOR',index)+1;
-      g_r_setpoint = g_input_string.substring(index).toFloat();
-     
-      if (g_l_setpoint > -MOTOR_MINIMUM_SPEED && g_l_setpoint < MOTOR_MINIMUM_SPEED) {
-        g_l_PID.SetOutputLimits(0, 0.1);
-      }
-      else {
-        g_l_PID.SetOutputLimits(-255, 255);
-      }
-      if (g_r_setpoint > -MOTOR_MINIMUM_SPEED && g_r_setpoint < MOTOR_MINIMUM_SPEED) {
-        g_r_PID.SetOutputLimits(0, 0.1);
-      }
-      else {
-        g_r_PID.SetOutputLimits(-255, 255);
-      }
-      
+    switch (g_input_string[0]) {
+      case MSG_VELOCITY:
+        s_speed_command_timeout = millis();
+        index = g_input_string.indexOf(MSG_FIELD_SEPARATOR)+1;
+        g_l_setpoint = g_input_string.substring(index).toFloat();
+        index = g_input_string.indexOf(MSG_FIELD_SEPARATOR,index)+1;
+        g_r_setpoint = g_input_string.substring(index).toFloat();
+       
+        if (g_l_setpoint > -MOTOR_MINIMUM_SPEED && g_l_setpoint < MOTOR_MINIMUM_SPEED) {
+          g_l_PID.SetOutputLimits(0, 0.1);
+        }
+        else {
+          g_l_PID.SetOutputLimits(-255, 255);
+        }
+        if (g_r_setpoint > -MOTOR_MINIMUM_SPEED && g_r_setpoint < MOTOR_MINIMUM_SPEED) {
+          g_r_PID.SetOutputLimits(0, 0.1);
+        }
+        else {
+          g_r_PID.SetOutputLimits(-255, 255);
+        }
+      break;
+      case MSG_LIDAR_ANGLE:
+        index = g_input_string.indexOf(MSG_FIELD_SEPARATOR)+1;
+        angle = g_input_string.substring(index).toInt();
+        if(angle <= 90 && angle >= -90) {
+          g_leddar_servo.write(g_input_string.substring(index).toInt() + 90);
+        }
+      break;
     }
-    else if (g_input_string[0] == MSG_LIDAR_ANGLE) {
-      Serial.println(g_input_string);
-     Serial.println( index = g_input_string.indexOf(MSG_FIELD_SEPARATOR)+1);
-      g_leddar_servo.write(g_input_string.substring(index).toInt());
-      Serial.println(g_input_string.substring(index).toInt());
+    // Stop  robot if speed command is not received for a period of SPEED_COMMAND_TIMEOUT_MS
+    if (millis() - s_speed_command_timeout > SPEED_COMMAND_TIMEOUT_MS) {
+      g_l_PID.SetOutputLimits(0, 0.1);
+      g_r_PID.SetOutputLimits(0, 0.1);
     }
     
     // clear input string:
